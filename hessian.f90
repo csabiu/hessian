@@ -8,7 +8,7 @@ program density_histogram
     type(kdtree2), pointer :: tree
     integer, parameter :: dp = selected_real_kind(15, 307)
     integer :: i, j, k, l, nx, ny, nz, count, ios, hist_res, nn2
-    real(dp), allocatable :: x(:,:), mass(:), wgt(:),gridxyz(:,:)
+    real(dp), allocatable :: x(:,:), mass(:), wgt(:),gridxyz(:)
     real(dp) :: x_min, x_max, y_min, y_max, z_min, z_max,sigma,dlogsfil,dlogswall,dlogsc
     real(dp) :: bin_size, field(3,3,3), dM1, dM2, dM3,max_sfil,min_sfil,max_swall,min_swall,max_sc,min_sc
     real(dp), allocatable ::  density(:,:,:), smoothed_density(:,:,:)
@@ -98,7 +98,7 @@ print*,'Code running with ',threads,' OMP threads'
     allocate(sfil(nx, ny, nz, nsmooth))
     allocate(swall(nx, ny, nz, nsmooth))
     allocate(scluster(nx, ny, nz,nsmooth))
-    allocate(gridxyz(3,nx*ny*nz))
+    allocate(gridxyz(3))
     allocate(resultsb(count))
 
     print*, 'memory allocated'
@@ -118,35 +118,38 @@ print*,'Code running with ',threads,' OMP threads'
 
     ! create a grid of points to interpolate the density field onto (x,y,z)
     density = 0.0_dp
-    l=0
+    !l=0
+    nn2=10
+    !$OMP PARALLEL DO PRIVATE(i,j,k,gridxyz,wgt,resultsb) SHARED(density,tree)
     do i = 1,nx
         print*,i
         do j = 1,ny
             do k = 1,nz
-                l=l+1
-                gridxyz(:,l) = [bin_size*(i-1)+x_min,bin_size*(j-1)+y_min,bin_size*(k-1)+z_min]       
+                !l=l+1
+                gridxyz(:) = [bin_size*(i-1)+x_min,bin_size*(j-1)+y_min,bin_size*(k-1)+z_min]       
                 ! call kd-tree to find the nearest neighbours to each grid point
                 !call kdtree2_r_nearest(tp=tree,qv=gridxyz(:,l),r2=(bin_size*5)**2,nfound=nn2,nalloc=(count),results=resultsb)  
-                call kdtree2_n_nearest(tp=tree,qv=gridxyz(:,l),nn=10,results=resultsb(1:10))
-                nn2=10
-                if(nn2==0) then
-                    density(i,j,k) = 0.0_dp
-                    cycle
-                endif
+                call kdtree2_n_nearest(tp=tree,qv=gridxyz,nn=nn2,results=resultsb(1:nn2))
+                !if(nn2==0) then
+                !    density(i,j,k) = 0.0_dp
+                !    cycle
+                !endif
                 ! calculate the rbf weights
                 call rbf_weight(3,nn2,x(:,resultsb(1:nn2)%idx),1.d0,phi5,mass(resultsb(1:nn2)%idx),wgt)
                 ! interpolate the density field onto the grid using the rbf weights
-                call rbf_interp_nd(3,nn2,x(:,resultsb(1:nn2)%idx),1.d0,phi5,wgt,1,gridxyz(:,l), density(i,j,k))
+                call rbf_interp_nd(3,nn2,x(:,resultsb(1:nn2)%idx),1.d0,phi5,wgt,1,gridxyz, density(i,j,k))
 
-                !print*,i,j,k,nn2,tmp(l)
+                !print*,i,j,k,density(i,j,k)
             end do
         end do
     end do
+    !$OMP END PARALLEL DO
 
     ! interpolate the density field onto the grid using the rbf weights
     !call rbf_interp_nd(3,count,x,1.d0,phi5,wgt,nx*ny*nz,gridxyz, tmp)
 
     print*, 'density grid created'
+    print*, maxval(density)
 
     ! normalise the log density field
     density = log10(density**10/sum(density**10))
@@ -165,7 +168,7 @@ print*,'Code running with ',threads,' OMP threads'
     ! calculate the hessian eigenvalues at each point in the smoothed log-density field
     ! calculate and save the filament and wall 'signatures' at each point and for each smoothing sigma
     ! parallelise over the grid points
-!$OMP PARALLEL DO schedule(dynamic) PRIVATE(i,j,k,hessian,eigenvalues,work,info) SHARED(smoothed_density,eigenvalue1,eigenvalue2,eigenvalue3)
+!$OMP PARALLEL DO PRIVATE(i,j,k,hessian,eigenvalues,work,info, field) SHARED(smoothed_density,eigenvalue1,eigenvalue2,eigenvalue3)
     do i = 2, nx-1
         do j = 2, ny-1
             do k = 2, nz-1
