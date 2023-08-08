@@ -20,7 +20,7 @@ program density_histogram
     character(len=32) :: hist_res_str
     real(dp), dimension(3*3) :: work
     integer :: info, threads, nsig, nsmooth
-    logical :: write_eig, write_density
+    logical :: write_eig, write_density, calc_density
     type(kdtree2_result),allocatable :: resultsb(:)
 
 
@@ -33,21 +33,32 @@ print*,'Code running with ',threads,' OMP threads'
     write_eig = .false.
     write_density = .true.
     nsmooth = 8
+    calc_density = .false.
 
-    ! Read histogram resolution from command-line arguments
+    ! Read filename, histogram resolution, calculate density option from command-line arguments
     if (command_argument_count() == 0) then
-        print *, 'Error: Please provide the histogram bin size as a command line argument.'
+        print*, 'Usage: hessian <filename> <histogram resolution> <calculate density>'
+        print*, '       <filename> is the name of the file containing the data'
+        print*, '       <histogram resolution> is the size of the bins in the histogram'
+        print*, '       <calculate density> is a boolean flag to calculate the density field'
+        print*, 'e.g. hessian input_data.txt 1.1 .true.'
         stop
+    else
+        call get_command_argument(1, filename)
+        call get_command_argument(2, hist_res_str)
+        read(hist_res_str, *) bin_size
+        call get_command_argument(3, hist_res_str)
+        read(hist_res_str, *) calc_density
     end if
-    call get_command_argument(1, hist_res_str)
-    read(hist_res_str, *) bin_size
+
 
  ! Read in the data from a text file
     !filename = 'input_data.txt'
     !filename = 'tmptmptmp'
     !filename = 'test.gal.txt.den'
-    filename = 'tmp.den'
+    !filename = 'tmp.den'
 
+    print*, 'reading data from ', filename
     open(10, file=filename, status='old', action='read')
     count = 0
     do
@@ -62,14 +73,11 @@ print*,'Code running with ',threads,' OMP threads'
 
     allocate(x(3, count), mass(count), wgt(count))
 
-  ! Re-read the data and store it in the allocated arrays
-    open(10, file=filename, status='old', action='read')
-    do i = 1, count
-        read(10, *) x(1,i), x(2,i), x(3,i), mass(i)
-    end do
-    close(10)
-
+    call read_data()
+  
     print*, 'data read in'
+
+
 
     ! Determine the bounding box of the input data
     x_min = minval(x(1,:)); x_max = maxval(x(1,:))
@@ -106,14 +114,14 @@ print*,'Code running with ',threads,' OMP threads'
 
     print*, 'memory allocated'
     
+    if (calc_density) then
+        call calculate_density()
+        print*, 'density calculated'
+    else
+
     ! log the mass field (add 0.1 to avoid log(0))
     !mass = log10(mass+0.1)
     mass = log10(mass)
-
-    ! Create a 3D mass field interpolated using rbf
-    ! first calculate the rbf weights
-    !call rbf_weight(3,count,x,1.d0,phi5,mass,wgt)
-    !print*,'calculated weights'
 
     ! create a kd-tree for the data
     tree => kdtree2_create(x,sort=.true.,rearrange=.true.)     ! this is how you create a tree.
@@ -121,11 +129,10 @@ print*,'Code running with ',threads,' OMP threads'
 
     ! create a grid of points to interpolate the density field onto (x,y,z)
     density = 0.0_dp
-    !l=0
-    nn2=10
+
+    nn2=10 ! number of nearest neighbours used for density estimation
     !$OMP PARALLEL DO PRIVATE(i,j,k,gridxyz,wgt,resultsb) SHARED(density,tree)
     do i = 1,nx
-        print*,i
         do j = 1,ny
             do k = 1,nz
                 !l=l+1
@@ -154,8 +161,10 @@ print*,'Code running with ',threads,' OMP threads'
     print*, 'density grid created'
     print*, maxval(density)
 
+endif
+
     ! normalise the log density field
-    density = log10(density**10/sum(density**10))
+    density = log10(10**density/sum(10**density))
 
     do l=1,nsmooth
         sigma=bin_size * sqrt(2.d0)**(l-1)
@@ -287,11 +296,11 @@ print*, 'eigenvalues calculated for each smoothing scale'
         do j = 1, ny
             do k = 1, nz
                 if(scluster(i, j, k,1)>thresh_c) then
-                    structure(i,j,k)=1
+                    structure(i,j,k)=3
                 elseif(sfil(i, j, k,1)>thresh_f) then
                     structure(i,j,k)=2
                 elseif(swall(i, j, k,1)>thresh_w) then
-                    structure(i,j,k)=3
+                    structure(i,j,k)=1
                 else
                     structure(i,j,k)=0
                 endif
@@ -383,6 +392,46 @@ print*, 'eigenvalues calculated for each smoothing scale'
     !close(20)
 
 contains
+
+
+    subroutine calculate_density()
+        ! bin the points into a grid (mass)
+
+        integer :: i, l, m, n
+        density=0.0_dp
+
+        do i = 1, count
+            ! Find the grid cell that the point is in
+            l = int((x(1,i)-x_min)/bin_size) + 1
+            m = int((x(2,i)-y_min)/bin_size) + 1
+            n = int((x(3,i)-z_min)/bin_size) + 1
+
+            ! Add the mass to the grid cell
+            density(l,m,n) = density(l,m,n) + 1.0_dp
+
+        end do
+        density = density + 1e-1_dp
+        density = density / bin_size**3
+        end subroutine calculate_density
+
+    subroutine read_data()
+
+        ! Re-read the data and store it in the allocated arrays
+        open(10, file=filename, status='old', action='read')
+        if(calc_density) then
+            do i = 1, count
+                read(10, *) x(1,i), x(2,i), x(3,i)
+            end do
+
+         else
+
+            do i = 1, count
+                read(10, *) x(1,i), x(2,i), x(3,i), mass(i)
+            end do
+        end if
+        close(10)
+
+    end subroutine read_data
 
     subroutine gaussian_smooth(input, output, nx, ny, nz, sigma)
         real(dp), intent(in) :: input(nx,ny,nz), sigma
