@@ -10,10 +10,12 @@ program density_histogram
     integer :: i, j, k, l, nx, ny, nz, count, ios, hist_res, nn2
     real(dp), allocatable :: x(:,:), mass(:), wgt(:),gridxyz(:)
     real(dp) :: x_min, x_max, y_min, y_max, z_min, z_max,sigma,dlogsfil,dlogswall,dlogsc
+    real(dp) :: dM1_max,dM2_max,dM3_max,thresh_c,thresh_f,thresh_w
     real(dp) :: bin_size, field(3,3,3), dM1, dM2, dM3,max_sfil,min_sfil,max_swall,min_swall,max_sc,min_sc
     real(dp), allocatable ::  density(:,:,:), smoothed_density(:,:,:)
     real(dp), allocatable :: eigenvalue1(:,:,:), eigenvalue2(:,:,:), eigenvalue3(:,:,:)
     real(dp), allocatable :: hessian(:,:), eigenvalues(:), sfil(:,:,:,:),swall(:,:,:,:),scluster(:,:,:,:)
+    integer, allocatable :: structure(:,:,:)
     character(len=256) :: filename, out
     character(len=32) :: hist_res_str
     real(dp), dimension(3*3) :: work
@@ -30,7 +32,7 @@ print*,'Code running with ',threads,' OMP threads'
 
     write_eig = .false.
     write_density = .true.
-    nsmooth = 10
+    nsmooth = 8
 
     ! Read histogram resolution from command-line arguments
     if (command_argument_count() == 0) then
@@ -100,6 +102,7 @@ print*,'Code running with ',threads,' OMP threads'
     allocate(scluster(nx, ny, nz,nsmooth))
     allocate(gridxyz(3))
     allocate(resultsb(count))
+    allocate(structure(nx, ny, nz))
 
     print*, 'memory allocated'
     
@@ -158,9 +161,10 @@ print*,'Code running with ',threads,' OMP threads'
         sigma=bin_size * sqrt(2.d0)**(l-1)
         ! Smooth the density field with a Gaussian function
         call gaussian_smooth(density, smoothed_density, nx, ny, nz, sigma)
+        !call fft_gaussian_smooth(density, smoothed_density, nx, ny, nz, sigma)
 
         ! normalise the smoothed log density field
-        smoothed_density = log10(smoothed_density**10/sum(smoothed_density**10))
+        smoothed_density = log10(10**smoothed_density/sum(10**smoothed_density))
 
         print*, 'density field smoothed with sigma = ', sigma
         print*, sum(10**density), sum(10**smoothed_density)
@@ -205,10 +209,9 @@ print*,'Code running with ',threads,' OMP threads'
     end do
 !$OMP END PARALLEL DO
 
-    ! write the smoothed log-density field to file (if requested)
+    ! write the smoothed log-density field to file (if requested) smoothed_density_N.txt
     if(write_density) then
-        write(out, '(i1)') l
-        write(out,*) 'smoothed_density'//trim(adjustl(out))//'.txt'
+        write(out, '(a,i0,a)') 'smoothed_density_', l, '.txt'
         out = trim(adjustl(out)) 
         open(20, file=out, status='replace', action='write')
         do i = 1, nx
@@ -229,6 +232,7 @@ print*, 'eigenvalues calculated for each smoothing scale'
     do i = 2, nx-1
         do j = 2, ny-1
             do k = 2, nz-1
+                scluster(i, j, k,1) = maxval(scluster(i, j, k, :))
                 sfil(i, j, k,1) = maxval(sfil(i, j, k, :))
                 swall(i, j, k,1) = maxval(swall(i, j, k, :))
             end do
@@ -261,10 +265,38 @@ print*, 'eigenvalues calculated for each smoothing scale'
 
     do i = 1,nsig
         dM1 = sum(10.d0**smoothed_density, mask = (scluster(:,:,:,1) >= 10.0_dp**(log10(min_sc) + dlogsc * (i-1))) .and. scluster(:,:,:,1) < 10.0_dp**(log10(min_sc) + dlogsc * i))
+        if(dM1>dM1_max) then
+            thresh_c=10.0_dp**(log10(min_sc) + dlogsc * (i-1))
+            dM1_max=dM1
+        endif
         dM2 = sum(10.d0**smoothed_density, mask = (sfil(:,:,:,1) >= 10.0_dp**(log10(min_sfil) + dlogsfil * (i-1))) .and. sfil(:,:,:,1) < 10.0_dp**(log10(min_sfil) + dlogsfil * i))
+        if(dM2>dM2_max) then
+            thresh_f=10.0_dp**(log10(min_sfil) + dlogsfil * (i-1))
+            dM2_max=dM2
+        endif
         dM3 = sum(10.d0**smoothed_density, mask = (swall(:,:,:,1) >= 10.0_dp**(log10(min_swall) + dlogswall * (i-1))) .and. swall(:,:,:,1) < 10.0_dp**(log10(min_swall) + dlogswall * i))
+        if(dM3>dM3_max) then
+            thresh_w=10.0_dp**(log10(min_swall) + dlogswall * (i-1))
+            dM3_max=dM3
+        endif
         !print*, 10.0_dp**(log10(min_sfil) + dlogsfil * (i-1)), dM2, dM3
         print*, 10.0_dp**(log10(min_sc) + dlogsc * (i-1)), dM1,10.0_dp**(log10(min_sfil) + dlogsfil * (i-1)), dM2, 10.0_dp**(log10(min_swall) + dlogswall * (i-1)), dM3
+    enddo
+
+    do i = 1,nx
+        do j = 1, ny
+            do k = 1, nz
+                if(scluster(i, j, k,1)>thresh_c) then
+                    structure(i,j,k)=1
+                elseif(sfil(i, j, k,1)>thresh_f) then
+                    structure(i,j,k)=2
+                elseif(swall(i, j, k,1)>thresh_w) then
+                    structure(i,j,k)=3
+                else
+                    structure(i,j,k)=0
+                endif
+            enddo
+        enddo
     enddo
 
     ! Output eigenvalues
@@ -325,6 +357,19 @@ print*, 'eigenvalues calculated for each smoothing scale'
         close(20)
     endif
 
+    ! Output final structure file
+   !! if(write_density) then
+        open(20, file='structure.txt', status='replace', action='write')
+        do i = 1, nx
+            do j = 1, ny
+                do k = 1, nz
+                    write(20, '(4i5)') i, j, k, structure(i, j, k)
+                end do
+            end do
+        end do
+        close(20)
+    !endif
+
 
     ! output 1 component of the hessian
     !open(20, file='hessian.txt', status='replace', action='write')
@@ -339,7 +384,6 @@ print*, 'eigenvalues calculated for each smoothing scale'
 
 contains
 
-
     subroutine gaussian_smooth(input, output, nx, ny, nz, sigma)
         real(dp), intent(in) :: input(nx,ny,nz), sigma
         real(dp), intent(out) :: output(nx,ny,nz)
@@ -351,8 +395,8 @@ contains
 
         output = 0.0_dp
         ! smooth field
-        ! add parallelization
-        !$omp parallel do private(i, j, k, ii, jj, kk, weight, total_weight) shared(input, output)
+        ! add parallelization with dynamic schedule
+        !$OMP PARALLEL DO PRIVATE( i,j,k, ii, jj, kk, weight, total_weight,gaussian_exp,dx,dy,dz) SHARED(input, output, sigma, sigma3, nx, ny, nz)
         do i = 1, nx
             do j = 1, ny
                 do k = 1, nz
@@ -374,9 +418,61 @@ contains
                 end do
             end do
         end do
-        !$omp end parallel do
+        !$OMP END PARALLEL DO
 
     end subroutine gaussian_smooth
+    
+
+    subroutine gaussian_smooth2(input, output, nx, ny, nz, sigma)
+        real(dp), intent(in) :: input(nx,ny,nz), sigma
+        real(dp), intent(out) :: output(nx,ny,nz)
+        real(dp), allocatable :: tmp(:,:,:), kernal(:,:,:)
+        integer, intent(in) :: nx, ny, nz
+        integer :: i, j, k, ii, jj, kk, sigma3
+        real(dp) :: total_weight, gaussian_exp, dx, dy, dz, weight
+        
+        sigma3 = int(3 * sigma/bin_size)
+
+        allocate(tmp(nx+2*sigma3,ny+2*sigma3,nz+2*sigma3))
+        allocate(kernal(2*sigma3+1,2*sigma3+1,2*sigma3+1))
+
+        tmp = 0.0_dp
+        tmp(sigma3+1:nx+sigma3,sigma3+1:ny+sigma3,sigma3+1:nz+sigma3) = input + 1d-10
+
+        !precompute the gaussian kernal
+        do i = 1, 2*sigma3+1
+            do j = 1, 2*sigma3+1
+                do k = 1, 2*sigma3+1
+                    dx = real(i - sigma3 - 1, dp) * bin_size
+                    dy = real(j - sigma3 - 1, dp) * bin_size
+                    dz = real(k - sigma3 - 1, dp) * bin_size
+                    gaussian_exp = - (dx*dx + dy*dy + dz*dz) / (2.0_dp * sigma * sigma)
+                    kernal(i, j, k) = exp(gaussian_exp)
+                end do
+            end do
+        end do
+        !total_weight = sum(kernal)
+        
+        output = 0.0_dp
+        ! smooth field with precomputed kernal
+        ! use mask to avoid do loops
+        ! add parallelization with dynamic schedule
+        !$OMP PARALLEL DO PRIVATE( i,j,k) SHARED(tmp, output, sigma3)
+        do i = 1, nx
+            do j = 1, ny
+                do k = 1, nz
+                    total_weight = sum(kernal, mask = tmp(i-sigma3:i+sigma3, j-sigma3:j+sigma3, k-sigma3:k+sigma3)>0.0_dp)
+                    output(i, j, k) = sum(kernal*tmp(i-sigma3:i+sigma3, j-sigma3:j+sigma3, k-sigma3:k+sigma3))/total_weight
+                end do
+            end do
+        end do
+        !$OMP END PARALLEL DO
+
+        deallocate(kernal)
+        deallocate(tmp)
+
+    end subroutine gaussian_smooth2
+    
 
 function heaviside(x) result(y)
     real(dp), intent(in) :: x
