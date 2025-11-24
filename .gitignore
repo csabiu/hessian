@@ -1,0 +1,17 @@
+# Compiled binaries
+hessian
+
+# Fortran module files
+*.mod
+
+# Output data files
+*.txt
+!test_input.dat
+
+# Editor backup files
+*~
+*.swp
+*.swo
+
+# OS files
+.DS_Store
